@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="it"><head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Crypto Journal Pro Sync</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
+  <style>
+    body { font-family: Arial,sans-serif; margin:10px; background:#f4f4f4 }
+    .container { background:white; padding:20px; border-radius:8px; max-width:1000px; margin:auto }
+    label, select, input, textarea, button { display:block; width:100%; margin-top:15px; box-sizing:border-box; }
+    textarea { resize:vertical }
+    button { padding:10px; font-size:16px; border:none; border-radius:5px; cursor:pointer }
+    .btn-green { background:#28a745;color:white }
+    .btn-red { background:#dc3545;color:white }
+    .btn-blue { background:#007bff;color:white }
+    .result, .filters, .stats { margin-top:20px; background:#e9ecef; padding:10px; border-radius:5px }
+    table { width:100%; border-collapse:collapse; margin-top:20px; font-size:0.9rem }
+    th,td { border:1px solid #ccc; padding:6px; text-align:center }
+    th { background:#f8f9fa }
+    .delete-btn { background:#dc3545;color:white;padding:5px 10px;border:none;border-radius:4px;cursor:pointer }
+    canvas { margin-top:40px; max-width:100% }
+    @media(max-width:600px){table,thead,tbody,tr,th,td{display:block;}th{text-align:left}
+      tr{margin-bottom:10px}td{text-align:left;padding-left:50%;position:relative}
+      td::before{position:absolute;left:6px;width:45%;white-space:nowrap;font-weight:bold}
+      td:nth-child(1)::before{content:"Data"}td:nth-child(2)::before{content:"Tipo"}
+      td:nth-child(3)::before{content:"Entrata"}td:nth-child(4)::before{content:"SL"}
+      td:nth-child(5)::before{content:"TP"}td:nth-child(6)::before{content:"Lotti"}
+      td:nth-child(7)::before{content:"Rischio €"}td:nth-child(8)::before{content:"Profitto $"}
+      td:nth-child(9)::before{content:"R/R"}td:nth-child(10)::before{content:"Commento"}
+      td:nth-child(11)::before{content:"Elimina"}}
+  </style>
+</head><body>
+<div class="container">
+  <h2>📊 Crypto Journal Pro (Sync & Stats)</h2>
+  <select id="tradeType"><option value="long">Long</option><option value="short">Short</option></select>
+  <input type="number" id="accountSize" placeholder="Capitale (€)" value="10000" />
+  <input type="number" id="riskPercent" placeholder="Rischio per trade (%)" value="1" />
+  <input type="number" id="entryPrice" placeholder="Entrata ($)" value="117800" />
+  <input type="number" id="stopLoss" placeholder="Stop Loss ($)" value="127000" />
+  <input type="number" id="takeProfit" placeholder="Take Profit ($)" value="107900" />
+  <textarea id="comment" placeholder="Commento..."></textarea>
+  <button class="btn-green" onclick="calculate()">📌 Calcola e Salva</button>
+  <div class="result" id="result"></div>
+
+  <div class="filters"><h4>🔍 Filtri Diario</h4>
+    <select id="filterType" onchange="applyFilters()"><option value="all">Tutti</option><option value="long">Long</option><option value="short">Short</option></select>
+    <input type="number" id="filterRR" placeholder="Min R/R" value="0" step="0.1" onchange="applyFilters()" />
+  </div>
+
+  <div class="stats" id="stats"></div>
+  <table id="journal"><thead><tr>
+    <th>Data</th><th>Tipo</th><th>Entrata</th><th>SL</th><th>TP</th><th>Lotti</th><th>Rischio €</th><th>Profitto $</th><th>R/R</th><th>Commento</th><th>❌</th>
+  </tr></thead><tbody></tbody></table>
+
+  <button class="btn-red" onclick="clearJournal()">🧼 Pulisci Diario</button>
+  <button class="btn-blue" onclick="exportCSV()">📤 Esporta CSV</button>
+
+  <canvas id="rrChart" height="100"></canvas>
+</div>
+
+<script>
+  // 🔑 FIREBASE CONFIG: incolla le tue credenziali
+  const firebaseConfig = { apiKey: "...", authDomain: "...", projectId: "..." };
+  firebase.initializeApp(firebaseConfig);
+  const db = firebase.firestore();
+  db.enablePersistence().catch(()=>{console.warn("Offline persistence non disponibile");});
+
+  let allTrades = [];
+
+  function loadFromFirebase() {
+    db.collection("cryptoTrades").orderBy("timestamp")
+      .onSnapshot(snap => {
+        allTrades = snap.docs.map(d=>({id:d.id,...d.data()}));
+        updateJournal(); updateChart(); updateStats();
+      });
+  }
+
+  function calculate() {
+    const tType = document.getElementById('tradeType').value;
+    const acc = parseFloat(document.getElementById('accountSize').value);
+    const rPerc = parseFloat(document.getElementById('riskPercent').value);
+    const ent = parseFloat(document.getElementById('entryPrice').value);
+    const sl = parseFloat(document.getElementById('stopLoss').value);
+    const tp = parseFloat(document.getElementById('takeProfit').value);
+    const com = document.getElementById('comment').value;
+    const rAmt = acc*(rPerc/100);
+    const sDist = tType==='long'? ent-sl: sl-ent;
+    const tpDist = tType==='long'? tp-ent: ent-tp;
+    if(sDist<=0||tpDist<=0){document.getElementById('result').innerHTML="⚠️ SL/TP non validi";return;}
+    const lSize=rAmt/sDist;
+    const pProfit=tpDist*lSize;
+    const rr=pProfit/rAmt;
+    document.getElementById('result').innerHTML=`Lotti:${lSize.toFixed(3)}, R/R:${rr.toFixed(2)}`;
+    const trade={ timestamp:Date.now(), date:new Date().toLocaleString(),
+      tradeType:tType, entryPrice:ent, stopLoss:sl, takeProfit:tp,
+      lotSize:lSize, riskAmount:rAmt, potentialProfit:pProfit, rrRatio:rr, comment:com
+    };
+    db.collection("cryptoTrades").add(trade);
+  }
+
+  function deleteTrade(id){ db.collection("cryptoTrades").doc(id).delete(); }
+  function clearJournal(){
+    if(confirm("Cancelli tutto?")){
+      db.collection("cryptoTrades").listDocuments().then(docs=>docs.forEach(d=>d.delete()));
+    }
+  }
+  function exportCSV(){
+    let csv="Data,Tipo,Entrata,SL,TP,Lotti,Rischio €,Profitto $,R/R,Commento\n";
+    allTrades.forEach(t=>{
+      csv+=`"${t.date}",${t.tradeType},${t.entryPrice},${t.stopLoss},${t.takeProfit},${t.lotSize.toFixed(3)},${t.riskAmount.toFixed(2)},${t.potentialProfit.toFixed(2)},${t.rrRatio.toFixed(2)},"${t.comment}"\n`;
+    });
+    const dl=new Blob([csv],{type:"text/csv"}), link=document.createElement("a");
+    link.href=URL.createObjectURL(dl); link.download="journal.csv"; link.click();
+  }
+
+  function updateJournal(){
+    const tbody=document.querySelector("#journal tbody");
+    tbody.innerHTML="";
+    const ft=document.getElementById("filterType").value;
+    const fr=parseFloat(document.getElementById("filterRR").value);
+    allTrades.filter(t=> (ft==="all"||t.tradeType===ft) && t.rrRatio>=fr)
+      .forEach(t=>{
+        const r=document.createElement("tr");
+        r.innerHTML=`<td>${t.date}</td><td>${t.tradeType.toUpperCase()}</td><td>${t.entryPrice}</td><td>${t.stopLoss}</td><td>${t.takeProfit}</td><td>${t.lotSize.toFixed(3)}</td><td>${t.riskAmount.toFixed(2)}</td><td>${t.potentialProfit.toFixed(2)}</td><td>${t.rrRatio.toFixed(2)}</td><td>${t.comment}</td><td><button class="delete-btn" onclick="deleteTrade('${t.id}')">❌</button></td>`;
+        tbody.appendChild(r);
+      });
+  }
+
+  let chart;
+  function updateChart(){
+    const ft=document.getElementById("filterType").value;
+    const fr=parseFloat(document.getElementById("filterRR").value);
+    const f=allTrades.filter(t=> (ft==="all"||t.tradeType===ft) && t.rrRatio>=fr);
+    const labels=f.map((_,i)=>`#${i+1}`), data=f.map(t=>t.rrRatio);
+    if(chart)chart.destroy();
+    const ctx=document.getElementById('rrChart').getContext('2d');
+    chart=new Chart(ctx,{type:'bar',data:{labels,datasets:[{data,backgroundColor:data.map(r=>r>=2?'#28a745':r>=1?'#ffc107':'#dc3545')}]},options:{responsive:true,scales:{y:{beginAtZero:true,title:{display:true,text:"R/R Ratio"}}},plugins:{legend:{display:false}}}});
+  }
+
+  function updateStats(){
+    const total=allTrades.length, wins=allTrades.filter(t=>t.potentialProfit>0).length;
+    const avgRR= total? (allTrades.reduce((s,t)=>s+t.rrRatio,0)/total).toFixed(2):0;
+    const cum= allTrades.reduce((s,t)=>s+t.potentialProfit,0).toFixed(2);
+    document.getElementById('stats').innerHTML=`📈 Win rate: ${((wins/total)*100 || 0).toFixed(1)}% • Media R/R: ${avgRR} • Profitto cumulativo: $${cum}`;
+  }
+
+  function applyFilters(){updateJournal();updateChart();updateStats();}
+  loadFromFirebase();
+</script>
+</body></html>
